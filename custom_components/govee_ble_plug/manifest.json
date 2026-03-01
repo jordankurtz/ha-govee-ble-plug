@@ -3,14 +3,16 @@
   "name": "Govee BLE Plug",
   "version": "1.0.0",
   "config_flow": true,
+  "iot_class": "local_push",
   "bluetooth": [
     {"local_name": "Govee_H5080*"},
     {"local_name": "GVH5080*"}
   ],
   "dependencies": ["bluetooth_adapters"],
-  "iot_class": "local_push",
   "requirements": [
     "bleak>=0.21.0",
     "bleak-retry-connector>=3.0.0"
-  ]
+  ],
+  "documentation": "https://github.com/jordankurtz/ha-govee-ble-plug",
+  "codeowners": ["@jordankurtz"]
 }
