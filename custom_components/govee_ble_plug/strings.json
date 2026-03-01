@@ -1,0 +1,24 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Govee BLE Plug",
+        "description": "Select a discovered Govee H5080 plug to set up.",
+        "data": {
+          "address": "Device"
+        }
+      },
+      "pair_confirm": {
+        "title": "Pair {name}",
+        "description": "Click **Submit**, then within 30 seconds press the physical button on the **{name}** plug to authorise the pairing."
+      }
+    },
+    "error": {
+      "pairing_failed": "Pairing failed — the button was not pressed in time or the device could not be reached. Please try again."
+    },
+    "abort": {
+      "already_configured": "This device is already configured.",
+      "no_devices_found": "No Govee H5080 plugs were found nearby. Make sure the plug is powered and within Bluetooth range."
+    }
+  }
+}
