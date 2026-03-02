@@ -21,7 +21,7 @@ from .device import GoveePlugDevice
 _LOGGER = logging.getLogger(__name__)
 
 # Local name prefixes/patterns that indicate a Govee H5080
-GOVEE_LOCAL_NAME_PREFIXES = ("Govee_H5080", "GVH5080")
+GOVEE_LOCAL_NAME_PREFIXES = ("ihoment_H5080", "Govee_H5080", "GVH5080")
 
 
 def _is_govee_plug(info: BluetoothServiceInfoBleak) -> bool:
