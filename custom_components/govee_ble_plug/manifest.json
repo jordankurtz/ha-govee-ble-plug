@@ -1,9 +1,10 @@
 {
   "domain": "govee_ble_plug",
   "name": "Govee BLE Plug",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "config_flow": true,
   "bluetooth": [
+    {"local_name": "ihoment_H5080*"},
     {"local_name": "Govee_H5080*"},
     {"local_name": "GVH5080*"}
   ],
