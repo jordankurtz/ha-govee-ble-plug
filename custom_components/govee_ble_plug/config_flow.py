@@ -39,6 +39,7 @@ class GoveePlugConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._discovered_devices: dict[str, BluetoothServiceInfoBleak] = {}
         self._selected_address: str | None = None
         self._selected_name: str | None = None
+        self._selected_service_info: BluetoothServiceInfoBleak | None = None
         self._pairing_device: GoveePlugDevice | None = None
 
     # ------------------------------------------------------------------
@@ -54,6 +55,7 @@ class GoveePlugConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         self._selected_address = discovery_info.address
         self._selected_name = discovery_info.name or f"Govee Plug {discovery_info.address[-5:]}"
+        self._selected_service_info = discovery_info
         self.context["title_placeholders"] = {"name": self._selected_name}
 
         return await self.async_step_pair_confirm()
@@ -71,6 +73,7 @@ class GoveePlugConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             info = self._discovered_devices.get(address)
             self._selected_address = address
             self._selected_name = (info.name if info else None) or f"Govee Plug {address[-5:]}"
+            self._selected_service_info = info
 
             await self.async_set_unique_id(address)
             self._abort_if_unique_id_configured()
@@ -126,8 +129,10 @@ class GoveePlugConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         errors: dict[str, str] = {}
 
+        ble_device = self._selected_service_info.device if self._selected_service_info else None
         device = GoveePlugDevice(
             address=self._selected_address,
+            ble_device=ble_device,
             auth_key=None,
             name=self._selected_name,
         )

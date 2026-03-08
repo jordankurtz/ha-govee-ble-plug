@@ -6,6 +6,7 @@ import logging
 from typing import Callable
 
 from bleak import BleakClient
+from bleak.backends.device import BLEDevice
 from bleak.exc import BleakError
 from bleak_retry_connector import establish_connection
 
@@ -32,11 +33,13 @@ class GoveePlugDevice:
     def __init__(
         self,
         address: str,
+        ble_device: BLEDevice | None = None,
         auth_key: bytes | None = None,
         name: str | None = None,
     ) -> None:
         """Initialize device."""
         self._address = address
+        self._ble_device = ble_device
         self._auth_key = auth_key  # 15-byte key; None until pairing complete
         self._name = name or f"Govee Plug {address[-5:]}"
         self._client: BleakClient | None = None
@@ -75,6 +78,10 @@ class GoveePlugDevice:
     def auth_key(self) -> bytes | None:
         """Return stored auth key (None until paired)."""
         return self._auth_key
+
+    def set_ble_device(self, ble_device: BLEDevice) -> None:
+        """Update the BLEDevice reference (e.g. from a fresh advertisement)."""
+        self._ble_device = ble_device
 
     # ------------------------------------------------------------------
     # Callbacks
@@ -220,10 +227,12 @@ class GoveePlugDevice:
 
     async def _open_ble_connection(self) -> None:
         """Establish BLE connection and start notifications."""
+        if self._ble_device is None:
+            raise BleakError(f"No BLEDevice available for {self._address}")
         _LOGGER.debug("Connecting to %s", self._address)
         self._client = await establish_connection(
             BleakClient,
-            device=self._address,  # type: ignore[arg-type]
+            device=self._ble_device,
             name=self._name,
             disconnected_callback=self._on_disconnect,
         )
