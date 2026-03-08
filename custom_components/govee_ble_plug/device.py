@@ -274,24 +274,28 @@ class GoveePlugDevice:
     def _on_notification(self, _sender: int, data: bytearray) -> None:
         """Route incoming BLE notification to appropriate handler."""
         pkt = bytes(data)
-        _LOGGER.debug("Notification: %s", pkt.hex())
+        _LOGGER.info("Notification (%d bytes): %s", len(pkt), pkt.hex())
 
         if len(pkt) < 2:
+            _LOGGER.warning("Notification too short (%d bytes)", len(pkt))
             return
 
         if not verify_checksum(pkt):
-            _LOGGER.debug("Checksum mismatch — ignoring")
+            _LOGGER.warning("Checksum mismatch — raw: %s", pkt.hex())
             return
 
         hi, lo = pkt[0], pkt[1]
 
         if hi == 0xAA and lo == 0xB1:
             # Button-press response during pairing
+            _LOGGER.info("Auth response received — pkt[2]=0x%02x, len=%d", pkt[2], len(pkt))
             key = extract_auth_key(pkt)
             if key is not None:
                 self._auth_key = key
-                _LOGGER.debug("Auth key received: %s", key.hex())
+                _LOGGER.info("Auth key extracted: %s", key.hex())
                 self._auth_req_event.set()
+            else:
+                _LOGGER.warning("Auth key extraction failed from: %s", pkt.hex())
 
         elif hi == 0x33 and lo == 0xB2:
             # Auth confirmation
