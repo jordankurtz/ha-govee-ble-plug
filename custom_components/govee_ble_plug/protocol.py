@@ -32,14 +32,13 @@ def parse_state_response(packet: bytes) -> bool:
 def extract_auth_key(packet: bytes) -> bytes | None:
     """Extract auth key from AA B1 button-press response.
 
-    Returns the key bytes from the payload (bytes 2-17), or None if
-    the payload is entirely empty.
+    Returns 15-byte key from bytes 3-17, or None if empty.
     """
     if len(packet) < 19:
         return None
-    # bytes[2..17] are the key region (16 bytes); packet[-1] is checksum
-    key = bytes(packet[2:18])
-    if key == b"\x00" * 16:
+    # bytes[3..17] are the key (15 bytes); packet[-1] is checksum
+    key = bytes(packet[3:18])
+    if key == b"\x00" * 15:
         return None
     return key
 
