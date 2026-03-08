@@ -32,12 +32,16 @@ def parse_state_response(packet: bytes) -> bool:
 def extract_auth_key(packet: bytes) -> bytes | None:
     """Extract auth key from AA B1 button-press response.
 
-    Returns 15-byte key when packet[2] == 0x01, else None.
+    Returns the key bytes from the payload (bytes 2-17), or None if
+    the payload is entirely empty.
     """
-    if len(packet) < 19 or packet[2] != 0x01:
+    if len(packet) < 19:
         return None
-    # bytes[3..17] are the key (15 bytes); packet[-1] is checksum
-    return bytes(packet[3:18])
+    # bytes[2..17] are the key region (16 bytes); packet[-1] is checksum
+    key = bytes(packet[2:18])
+    if key == b"\x00" * 16:
+        return None
+    return key
 
 
 def parse_advertisement_state(mfr_data: dict[int, bytes] | None) -> bool | None:
