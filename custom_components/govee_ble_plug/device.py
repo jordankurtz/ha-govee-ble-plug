@@ -204,12 +204,14 @@ class GoveePlugDevice:
             assert self._auth_key is not None
             self._auth_conf_event.clear()
             conf_pkt = build_packet(*CMD_AUTH_CONF, payload=self._auth_key)
+            _LOGGER.info("Sending auth confirmation (%d-byte key: %s)", len(self._auth_key), self._auth_key.hex())
             await self._client.write_gatt_char(WRITE_CHAR_UUID, conf_pkt, response=False)
 
             try:
                 await asyncio.wait_for(self._auth_conf_event.wait(), BLE_TIMEOUT)
+                _LOGGER.info("Auth confirmation acknowledged by device")
             except asyncio.TimeoutError:
-                _LOGGER.warning("Auth confirmation timeout — continuing anyway")
+                _LOGGER.warning("Auth confirmation timeout — device did not respond")
 
             self._connected = True
 
@@ -217,7 +219,7 @@ class GoveePlugDevice:
             pkt = build_packet(*CMD_STATE_QUERY)
             await self._client.write_gatt_char(WRITE_CHAR_UUID, pkt, response=False)
 
-            _LOGGER.info("Connected to %s", self._address)
+            _LOGGER.info("Connected to %s (client.is_connected=%s)", self._address, self._client.is_connected)
             return True
 
         except BleakError as exc:
@@ -229,15 +231,16 @@ class GoveePlugDevice:
         """Establish BLE connection and start notifications."""
         if self._ble_device is None:
             raise BleakError(f"No BLEDevice available for {self._address}")
-        _LOGGER.debug("Connecting to %s", self._address)
+        _LOGGER.info("Opening BLE connection to %s (ble_device=%s)", self._address, self._ble_device)
         self._client = await establish_connection(
             BleakClient,
             device=self._ble_device,
             name=self._name,
             disconnected_callback=self._on_disconnect,
         )
+        _LOGGER.info("BLE connected, subscribing to notifications on %s", NOTIFY_CHAR_UUID)
         await self._client.start_notify(NOTIFY_CHAR_UUID, self._on_notification)
-        _LOGGER.debug("BLE link up, notifications started")
+        _LOGGER.info("BLE link up, notifications started")
 
     async def _close_ble_connection(self) -> None:
         if self._client:
@@ -250,15 +253,19 @@ class GoveePlugDevice:
     async def _send_and_wait(self, packet: bytes, event: asyncio.Event, timeout: float = BLE_TIMEOUT) -> bool:
         """Write packet and wait for the associated response event."""
         if not self._connected or self._client is None:
-            _LOGGER.error("Cannot send — not connected")
+            _LOGGER.error("Cannot send — not connected (connected=%s, client=%s)", self._connected, self._client is not None)
             return False
 
         async with self._lock:
             try:
+                is_conn = self._client.is_connected if self._client else False
+                _LOGGER.info("Sending packet %s (client.is_connected=%s)", packet.hex(), is_conn)
                 event.clear()
                 await self._client.write_gatt_char(WRITE_CHAR_UUID, packet, response=False)
+                _LOGGER.info("Write succeeded, waiting for response (%.1fs timeout)", timeout)
                 try:
                     await asyncio.wait_for(event.wait(), timeout)
+                    _LOGGER.info("Response received for packet %s", packet[:2].hex())
                 except asyncio.TimeoutError:
                     _LOGGER.warning("Response timeout for packet %s", packet[:2].hex())
                 return True
