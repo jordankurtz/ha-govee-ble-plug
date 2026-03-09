@@ -6,6 +6,7 @@ import logging
 from typing import Callable
 
 from bleak import BleakClient
+from bleak.backends.device import BLEDevice
 from bleak.exc import BleakError
 from bleak_retry_connector import establish_connection
 
@@ -32,12 +33,14 @@ class GoveePlugDevice:
     def __init__(
         self,
         address: str,
+        ble_device: BLEDevice | None = None,
         auth_key: bytes | None = None,
         name: str | None = None,
     ) -> None:
         """Initialize device."""
         self._address = address
-        self._auth_key = auth_key  # 15-byte key; None until pairing complete
+        self._ble_device = ble_device
+        self._auth_key = auth_key  # 16-byte key; None until pairing complete
         self._name = name or f"Govee Plug {address[-5:]}"
         self._client: BleakClient | None = None
         self._lock = asyncio.Lock()
@@ -76,6 +79,10 @@ class GoveePlugDevice:
         """Return stored auth key (None until paired)."""
         return self._auth_key
 
+    def set_ble_device(self, ble_device: BLEDevice) -> None:
+        """Update the BLEDevice reference (e.g. from a fresh advertisement)."""
+        self._ble_device = ble_device
+
     # ------------------------------------------------------------------
     # Callbacks
     # ------------------------------------------------------------------
@@ -111,10 +118,9 @@ class GoveePlugDevice:
             return await self._do_connect()
 
     async def pair(self) -> bytes | None:
-        """Initiate pairing: send auth request, wait for button press.
+        """Initiate pairing: poll AA B1 until button is pressed.
 
-        Returns the 15-byte auth key on success, None on failure.
-        Caller must keep the connection open for the full AUTH_TIMEOUT.
+        Returns the 16-byte auth key on success, None on failure.
         """
         async with self._lock:
             try:
@@ -122,26 +128,33 @@ class GoveePlugDevice:
                 if self._client is None:
                     return None
 
-                # Send AA B1 auth request
-                self._auth_req_event.clear()
+                # Poll AA B1 until device responds with pkt[2]==0x01
+                # (indicating the physical button has been pressed)
                 pkt = build_packet(*CMD_AUTH_REQ)
-                await self._client.write_gatt_char(WRITE_CHAR_UUID, pkt, response=False)
-                _LOGGER.debug("Auth request sent, waiting for button press (%.0fs)", AUTH_TIMEOUT)
+                deadline = asyncio.get_event_loop().time() + AUTH_TIMEOUT
+                _LOGGER.debug("Polling AA B1, waiting for button press (%.0fs timeout)", AUTH_TIMEOUT)
 
-                # Wait for user to press button on plug
-                try:
-                    await asyncio.wait_for(self._auth_req_event.wait(), AUTH_TIMEOUT)
-                except asyncio.TimeoutError:
+                while asyncio.get_event_loop().time() < deadline:
+                    self._auth_req_event.clear()
+                    await self._client.write_gatt_char(WRITE_CHAR_UUID, pkt, response=False)
+                    try:
+                        await asyncio.wait_for(self._auth_req_event.wait(), 1.0)
+                        # _auth_req_event is only set when pkt[2]==0x01
+                        break
+                    except asyncio.TimeoutError:
+                        # No valid response yet — poll again
+                        continue
+                else:
                     _LOGGER.error("Pairing timeout — button not pressed in time")
                     await self._close_ble_connection()
                     return None
 
                 if self._auth_key is None:
-                    _LOGGER.error("Button-press response received but key extraction failed")
+                    _LOGGER.error("Auth event set but key extraction failed")
                     await self._close_ble_connection()
                     return None
 
-                # Send 33 B2 auth confirmation
+                # Send 33 B2 auth confirmation with the real key
                 self._auth_conf_event.clear()
                 conf_pkt = build_packet(*CMD_AUTH_CONF, payload=self._auth_key)
                 await self._client.write_gatt_char(WRITE_CHAR_UUID, conf_pkt, response=False)
@@ -149,10 +162,10 @@ class GoveePlugDevice:
                 try:
                     await asyncio.wait_for(self._auth_conf_event.wait(), BLE_TIMEOUT)
                 except asyncio.TimeoutError:
-                    _LOGGER.warning("No auth confirmation from device — continuing anyway")
+                    _LOGGER.warning("No auth confirmation from device — key may be wrong")
 
                 self._connected = True
-                _LOGGER.info("Pairing complete, auth key: %s", self._auth_key.hex())
+                _LOGGER.info("Pairing complete for %s", self._address)
                 return self._auth_key
 
             except BleakError as exc:
@@ -170,10 +183,14 @@ class GoveePlugDevice:
     # ------------------------------------------------------------------
 
     async def set_power(self, on: bool) -> bool:
-        """Send power on/off command."""
+        """Send power on/off command and query resulting state."""
         payload = bytes([POWER_ON_BYTE if on else POWER_OFF_BYTE])
         pkt = build_packet(*CMD_POWER, payload=payload)
-        return await self._send_and_wait(pkt, self._power_event)
+        ok = await self._send_and_wait(pkt, self._power_event)
+        if ok:
+            # Query state to get the confirmed on/off value
+            await self.query_state()
+        return ok
 
     async def query_state(self) -> bool | None:
         """Send state query; return current on/off state or None on failure."""
@@ -202,13 +219,19 @@ class GoveePlugDevice:
             try:
                 await asyncio.wait_for(self._auth_conf_event.wait(), BLE_TIMEOUT)
             except asyncio.TimeoutError:
-                _LOGGER.warning("Auth confirmation timeout — continuing anyway")
+                _LOGGER.warning("Auth confirmation timeout — device did not respond")
 
             self._connected = True
 
-            # Initial state query
+            # Initial state query — wait for response so it doesn't
+            # bleed into subsequent command handling
+            self._state_event.clear()
             pkt = build_packet(*CMD_STATE_QUERY)
             await self._client.write_gatt_char(WRITE_CHAR_UUID, pkt, response=False)
+            try:
+                await asyncio.wait_for(self._state_event.wait(), BLE_TIMEOUT)
+            except asyncio.TimeoutError:
+                _LOGGER.warning("Initial state query timeout")
 
             _LOGGER.info("Connected to %s", self._address)
             return True
@@ -220,10 +243,12 @@ class GoveePlugDevice:
 
     async def _open_ble_connection(self) -> None:
         """Establish BLE connection and start notifications."""
+        if self._ble_device is None:
+            raise BleakError(f"No BLEDevice available for {self._address}")
         _LOGGER.debug("Connecting to %s", self._address)
         self._client = await establish_connection(
             BleakClient,
-            device=self._address,  # type: ignore[arg-type]
+            device=self._ble_device,
             name=self._name,
             disconnected_callback=self._on_disconnect,
         )
@@ -259,7 +284,7 @@ class GoveePlugDevice:
 
     def _on_disconnect(self, _client: BleakClient) -> None:
         """Handle unexpected disconnection."""
-        _LOGGER.info("Disconnected from %s", self._address)
+        _LOGGER.debug("Disconnected from %s", self._address)
         self._connected = False
 
     def _on_notification(self, _sender: int, data: bytearray) -> None:
@@ -277,7 +302,7 @@ class GoveePlugDevice:
         hi, lo = pkt[0], pkt[1]
 
         if hi == 0xAA and lo == 0xB1:
-            # Button-press response during pairing
+            # Auth polling response during pairing
             key = extract_auth_key(pkt)
             if key is not None:
                 self._auth_key = key
@@ -297,8 +322,5 @@ class GoveePlugDevice:
 
         elif hi == 0x33 and lo == 0x01:
             # Power-set confirmation
-            # byte[2]: 0x01 on, 0x00 off (mirrors what we sent)
-            if len(pkt) > 2:
-                self.is_on = pkt[2] == 0x01 or pkt[2] == POWER_ON_BYTE
             self._power_event.set()
             self._fire_state_callbacks()

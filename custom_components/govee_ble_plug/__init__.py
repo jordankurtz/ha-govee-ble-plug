@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 
+from homeassistant.components.bluetooth import async_ble_device_from_address
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_ADDRESS, CONF_NAME, Platform
 from homeassistant.core import HomeAssistant
@@ -25,7 +26,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     _LOGGER.info("Setting up Govee BLE Plug at %s", address)
 
-    device = GoveePlugDevice(address=address, auth_key=auth_key, name=name)
+    ble_device = async_ble_device_from_address(hass, address)
+    if not ble_device:
+        raise ConfigEntryNotReady(f"BLE device not found for {address}")
+
+    device = GoveePlugDevice(address=address, ble_device=ble_device, auth_key=auth_key, name=name)
     coordinator = GoveePlugCoordinator(hass, device)
 
     if not await coordinator.async_setup():
