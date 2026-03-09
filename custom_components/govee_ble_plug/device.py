@@ -319,6 +319,6 @@ class GoveePlugDevice:
             # Power-set confirmation
             # byte[2]: 0x01 on, 0x00 off (mirrors what we sent)
             if len(pkt) > 2:
-                self.is_on = pkt[2] == 0x01 or pkt[2] == POWER_ON_BYTE
+                self.is_on = pkt[2] == POWER_ON_BYTE
             self._power_event.set()
             self._fire_state_callbacks()

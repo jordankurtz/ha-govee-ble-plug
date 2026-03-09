@@ -13,8 +13,8 @@ CMD_POWER = (0x33, 0x01)
 CMD_STATE_QUERY = (0xAA, 0x01)
 
 # Power payload bytes
-POWER_ON_BYTE = 0xFF
-POWER_OFF_BYTE = 0xF0
+POWER_ON_BYTE = 0x01
+POWER_OFF_BYTE = 0x00
 
 # Config entry keys
 CONF_AUTH_KEY = "auth_key"
