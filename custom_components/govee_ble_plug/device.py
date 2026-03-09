@@ -118,10 +118,9 @@ class GoveePlugDevice:
             return await self._do_connect()
 
     async def pair(self) -> bytes | None:
-        """Initiate pairing: send auth request, wait for button press.
+        """Initiate pairing: poll AA B1 until button is pressed.
 
-        Returns the 15-byte auth key on success, None on failure.
-        Caller must keep the connection open for the full AUTH_TIMEOUT.
+        Returns the 16-byte auth key on success, None on failure.
         """
         async with self._lock:
             try:
@@ -129,34 +128,43 @@ class GoveePlugDevice:
                 if self._client is None:
                     return None
 
-                # Send AA B1 auth request
-                self._auth_req_event.clear()
+                # Poll AA B1 until device responds with pkt[2]==0x01
+                # (indicating the physical button has been pressed)
                 pkt = build_packet(*CMD_AUTH_REQ)
-                await self._client.write_gatt_char(WRITE_CHAR_UUID, pkt, response=False)
-                _LOGGER.debug("Auth request sent, waiting for button press (%.0fs)", AUTH_TIMEOUT)
+                deadline = asyncio.get_event_loop().time() + AUTH_TIMEOUT
+                _LOGGER.info("Polling AA B1, waiting for button press (%.0fs timeout)", AUTH_TIMEOUT)
 
-                # Wait for user to press button on plug
-                try:
-                    await asyncio.wait_for(self._auth_req_event.wait(), AUTH_TIMEOUT)
-                except asyncio.TimeoutError:
+                while asyncio.get_event_loop().time() < deadline:
+                    self._auth_req_event.clear()
+                    await self._client.write_gatt_char(WRITE_CHAR_UUID, pkt, response=False)
+                    try:
+                        await asyncio.wait_for(self._auth_req_event.wait(), 1.0)
+                        # _auth_req_event is only set when pkt[2]==0x01
+                        break
+                    except asyncio.TimeoutError:
+                        # No valid response yet — poll again
+                        continue
+                else:
                     _LOGGER.error("Pairing timeout — button not pressed in time")
                     await self._close_ble_connection()
                     return None
 
                 if self._auth_key is None:
-                    _LOGGER.error("Button-press response received but key extraction failed")
+                    _LOGGER.error("Auth event set but key extraction failed")
                     await self._close_ble_connection()
                     return None
 
-                # Send 33 B2 auth confirmation
+                # Send 33 B2 auth confirmation with the real key
                 self._auth_conf_event.clear()
                 conf_pkt = build_packet(*CMD_AUTH_CONF, payload=self._auth_key)
+                _LOGGER.info("Sending auth confirmation with key: %s", self._auth_key.hex())
                 await self._client.write_gatt_char(WRITE_CHAR_UUID, conf_pkt, response=False)
 
                 try:
                     await asyncio.wait_for(self._auth_conf_event.wait(), BLE_TIMEOUT)
+                    _LOGGER.info("Auth confirmation acknowledged")
                 except asyncio.TimeoutError:
-                    _LOGGER.warning("No auth confirmation from device — continuing anyway")
+                    _LOGGER.warning("No auth confirmation from device — key may be wrong")
 
                 self._connected = True
                 _LOGGER.info("Pairing complete, auth key: %s", self._auth_key.hex())
@@ -177,47 +185,14 @@ class GoveePlugDevice:
     # ------------------------------------------------------------------
 
     async def set_power(self, on: bool) -> bool:
-        """Send power on/off command, trying multiple known formats."""
-        val = POWER_ON_BYTE if on else POWER_OFF_BYTE
-        key = self._auth_key or b""
-        # Try known Govee power command variations
-        candidates = [
-            ("33 01", build_packet(0x33, 0x01, payload=bytes([val]))),
-            ("33 01+key", build_packet(0x33, 0x01, payload=bytes([val]) + key)),
-            ("33 05", build_packet(0x33, 0x05, payload=bytes([val]))),
-            ("33 0A", build_packet(0x33, 0x0A, payload=bytes([val]))),
-            ("33 A1", build_packet(0x33, 0xA1, payload=bytes([val]))),
-            ("AA 05", build_packet(0xAA, 0x05, payload=bytes([val]))),
-        ]
-        for label, pkt in candidates:
-            _LOGGER.info("Trying power command %s: %s", label, pkt.hex())
-            old_state = self.is_on
-            # Drain any pending state events
-            self._state_event.clear()
-            await self._send_command(pkt)
-            # Wait for a state notification
-            try:
-                await asyncio.wait_for(self._state_event.wait(), 3.0)
-            except asyncio.TimeoutError:
-                _LOGGER.info("  %s: no response", label)
-                continue
-            if self.is_on != old_state:
-                _LOGGER.info("  %s: STATE CHANGED (is_on=%s)", label, self.is_on)
-                return True
-            _LOGGER.info("  %s: got response but state unchanged (is_on=%s)", label, self.is_on)
-        _LOGGER.warning("No power command variant produced a state change")
-        return False
-
-    async def _send_command(self, packet: bytes) -> bool:
-        """Write a packet without waiting for a response event."""
-        if not self._connected or self._client is None:
-            return False
-        try:
-            await self._client.write_gatt_char(WRITE_CHAR_UUID, packet, response=False)
-            return True
-        except BleakError as exc:
-            _LOGGER.error("Send error: %s", exc)
-            return False
+        """Send power on/off command and query resulting state."""
+        payload = bytes([POWER_ON_BYTE if on else POWER_OFF_BYTE])
+        pkt = build_packet(*CMD_POWER, payload=payload)
+        ok = await self._send_and_wait(pkt, self._power_event)
+        if ok:
+            # Query state to get the confirmed on/off value
+            await self.query_state()
+        return ok
 
     async def query_state(self) -> bool | None:
         """Send state query; return current on/off state or None on failure."""
@@ -343,15 +318,14 @@ class GoveePlugDevice:
         hi, lo = pkt[0], pkt[1]
 
         if hi == 0xAA and lo == 0xB1:
-            # Button-press response during pairing
-            _LOGGER.info("Auth response received — pkt[2]=0x%02x, len=%d", pkt[2], len(pkt))
+            # Auth polling response during pairing
             key = extract_auth_key(pkt)
             if key is not None:
                 self._auth_key = key
-                _LOGGER.info("Auth key extracted: %s", key.hex())
+                _LOGGER.info("Button pressed — auth key: %s", key.hex())
                 self._auth_req_event.set()
             else:
-                _LOGGER.warning("Auth key extraction failed from: %s", pkt.hex())
+                _LOGGER.debug("Auth poll: button not pressed yet (pkt[2]=0x%02x)", pkt[2])
 
         elif hi == 0x33 and lo == 0xB2:
             # Auth confirmation
@@ -365,9 +339,6 @@ class GoveePlugDevice:
             self._fire_state_callbacks()
 
         elif hi == 0x33 and lo == 0x01:
-            # Power-set confirmation
-            # byte[2]: 0x01 on, 0x00 off (mirrors what we sent)
-            if len(pkt) > 2:
-                self.is_on = pkt[2] == POWER_ON_BYTE
+            # Power-set confirmation — device acknowledged the command
+            _LOGGER.info("Power command acknowledged")
             self._power_event.set()
-            self._fire_state_callbacks()
