@@ -177,10 +177,14 @@ class GoveePlugDevice:
     # ------------------------------------------------------------------
 
     async def set_power(self, on: bool) -> bool:
-        """Send power on/off command."""
+        """Send power on/off command.
+
+        The H5080 confirms power changes via AA 01 state notifications
+        rather than 33 01 power-specific responses.
+        """
         payload = bytes([POWER_ON_BYTE if on else POWER_OFF_BYTE])
         pkt = build_packet(*CMD_POWER, payload=payload)
-        return await self._send_and_wait(pkt, self._power_event)
+        return await self._send_and_wait(pkt, self._state_event)
 
     async def query_state(self) -> bool | None:
         """Send state query; return current on/off state or None on failure."""
