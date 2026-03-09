@@ -79,6 +79,7 @@ class GoveePlugCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         change: bluetooth.BluetoothChange,
     ) -> None:
         """Parse passive advertisement for power state."""
+        self.device.set_ble_device(service_info.device)
         state = parse_advertisement_state(service_info.manufacturer_data)
         if state is None:
             return
