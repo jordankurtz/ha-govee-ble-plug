@@ -179,21 +179,45 @@ class GoveePlugDevice:
     async def set_power(self, on: bool) -> bool:
         """Send power on/off command, trying multiple known formats."""
         val = POWER_ON_BYTE if on else POWER_OFF_BYTE
+        key = self._auth_key or b""
         # Try known Govee power command variations
         candidates = [
             ("33 01", build_packet(0x33, 0x01, payload=bytes([val]))),
+            ("33 01+key", build_packet(0x33, 0x01, payload=bytes([val]) + key)),
             ("33 05", build_packet(0x33, 0x05, payload=bytes([val]))),
             ("33 0A", build_packet(0x33, 0x0A, payload=bytes([val]))),
             ("33 A1", build_packet(0x33, 0xA1, payload=bytes([val]))),
+            ("AA 05", build_packet(0xAA, 0x05, payload=bytes([val]))),
         ]
         for label, pkt in candidates:
             _LOGGER.info("Trying power command %s: %s", label, pkt.hex())
-            ok = await self._send_and_wait(pkt, self._state_event, timeout=3.0)
-            if ok and self._state_event.is_set():
-                _LOGGER.info("Power command %s got state response", label)
+            old_state = self.is_on
+            # Drain any pending state events
+            self._state_event.clear()
+            await self._send_command(pkt)
+            # Wait for a state notification
+            try:
+                await asyncio.wait_for(self._state_event.wait(), 3.0)
+            except asyncio.TimeoutError:
+                _LOGGER.info("  %s: no response", label)
+                continue
+            if self.is_on != old_state:
+                _LOGGER.info("  %s: STATE CHANGED (is_on=%s)", label, self.is_on)
                 return True
+            _LOGGER.info("  %s: got response but state unchanged (is_on=%s)", label, self.is_on)
         _LOGGER.warning("No power command variant produced a state change")
         return False
+
+    async def _send_command(self, packet: bytes) -> bool:
+        """Write a packet without waiting for a response event."""
+        if not self._connected or self._client is None:
+            return False
+        try:
+            await self._client.write_gatt_char(WRITE_CHAR_UUID, packet, response=False)
+            return True
+        except BleakError as exc:
+            _LOGGER.error("Send error: %s", exc)
+            return False
 
     async def query_state(self) -> bool | None:
         """Send state query; return current on/off state or None on failure."""
@@ -228,11 +252,17 @@ class GoveePlugDevice:
 
             self._connected = True
 
-            # Initial state query
+            # Initial state query — wait for response so it doesn't
+            # bleed into subsequent command handling
+            self._state_event.clear()
             pkt = build_packet(*CMD_STATE_QUERY)
             await self._client.write_gatt_char(WRITE_CHAR_UUID, pkt, response=False)
+            try:
+                await asyncio.wait_for(self._state_event.wait(), BLE_TIMEOUT)
+            except asyncio.TimeoutError:
+                _LOGGER.warning("Initial state query timeout")
 
-            _LOGGER.info("Connected to %s (client.is_connected=%s)", self._address, self._client.is_connected)
+            _LOGGER.info("Connected to %s (client.is_connected=%s, is_on=%s)", self._address, self._client.is_connected, self.is_on)
             return True
 
         except BleakError as exc:
