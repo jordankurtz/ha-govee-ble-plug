@@ -177,14 +177,23 @@ class GoveePlugDevice:
     # ------------------------------------------------------------------
 
     async def set_power(self, on: bool) -> bool:
-        """Send power on/off command.
-
-        The H5080 confirms power changes via AA 01 state notifications
-        rather than 33 01 power-specific responses.
-        """
-        payload = bytes([POWER_ON_BYTE if on else POWER_OFF_BYTE])
-        pkt = build_packet(*CMD_POWER, payload=payload)
-        return await self._send_and_wait(pkt, self._state_event)
+        """Send power on/off command, trying multiple known formats."""
+        val = POWER_ON_BYTE if on else POWER_OFF_BYTE
+        # Try known Govee power command variations
+        candidates = [
+            ("33 01", build_packet(0x33, 0x01, payload=bytes([val]))),
+            ("33 05", build_packet(0x33, 0x05, payload=bytes([val]))),
+            ("33 0A", build_packet(0x33, 0x0A, payload=bytes([val]))),
+            ("33 A1", build_packet(0x33, 0xA1, payload=bytes([val]))),
+        ]
+        for label, pkt in candidates:
+            _LOGGER.info("Trying power command %s: %s", label, pkt.hex())
+            ok = await self._send_and_wait(pkt, self._state_event, timeout=3.0)
+            if ok and self._state_event.is_set():
+                _LOGGER.info("Power command %s got state response", label)
+                return True
+        _LOGGER.warning("No power command variant produced a state change")
+        return False
 
     async def query_state(self) -> bool | None:
         """Send state query; return current on/off state or None on failure."""
@@ -242,6 +251,12 @@ class GoveePlugDevice:
             name=self._name,
             disconnected_callback=self._on_disconnect,
         )
+        # Log all services and characteristics for protocol discovery
+        for service in self._client.services:
+            _LOGGER.info("  Service: %s", service.uuid)
+            for char in service.characteristics:
+                props = ", ".join(char.properties)
+                _LOGGER.info("    Char: %s [%s]", char.uuid, props)
         _LOGGER.info("BLE connected, subscribing to notifications on %s", NOTIFY_CHAR_UUID)
         await self._client.start_notify(NOTIFY_CHAR_UUID, self._on_notification)
         _LOGGER.info("BLE link up, notifications started")
