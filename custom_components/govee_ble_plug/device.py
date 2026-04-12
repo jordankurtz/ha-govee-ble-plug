@@ -270,22 +270,34 @@ class GoveePlugDevice:
             return False
 
         async with self._lock:
-            try:
-                event.clear()
-                await self._client.write_gatt_char(WRITE_CHAR_UUID, packet, response=False)
+            for attempt in (0, 1):
                 try:
-                    await asyncio.wait_for(event.wait(), timeout)
-                except asyncio.TimeoutError:
-                    _LOGGER.warning("Response timeout for packet %s", packet[:2].hex())
-                return True
-            except BleakError as exc:
-                _LOGGER.error("Send error: %s", exc)
-                return False
+                    event.clear()
+                    await self._client.write_gatt_char(WRITE_CHAR_UUID, packet, response=False)
+                    try:
+                        await asyncio.wait_for(event.wait(), timeout)
+                    except asyncio.TimeoutError:
+                        _LOGGER.warning("Response timeout for packet %s", packet[:2].hex())
+                    return True
+                except BleakError as exc:
+                    # Stale service cache: characteristic missing after reconnect.
+                    # Drop the connection and re-establish once before giving up.
+                    if attempt == 0 and "not found" in str(exc).lower():
+                        _LOGGER.warning("Characteristic missing (%s) — reconnecting", exc)
+                        await self._close_ble_connection()
+                        self._connected = False
+                        if not await self._do_connect():
+                            return False
+                        continue
+                    _LOGGER.error("Send error: %s", exc)
+                    return False
+            return False
 
     def _on_disconnect(self, _client: BleakClient) -> None:
         """Handle unexpected disconnection."""
         _LOGGER.debug("Disconnected from %s", self._address)
         self._connected = False
+        self._client = None
 
     def _on_notification(self, _sender: int, data: bytearray) -> None:
         """Route incoming BLE notification to appropriate handler."""
